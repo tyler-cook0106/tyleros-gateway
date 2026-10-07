@@ -1,3 +1,4 @@
+/// <reference types="@cloudflare/workers-types" />
 import { Hono } from "hono";
 import {
   generateAuthenticationOptions,
