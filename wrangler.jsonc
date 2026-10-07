@@ -2,5 +2,28 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "tyleros-gateway",
   "main": "src/index.ts",
-  "compatibility_date": "2026-10-07"
+  "compatibility_date": "2026-10-07",
+
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/dmz/ingress"]
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "TYLEROS_AUTH",
+      "database_id": "1730cc75-9b46-4e81-8abf-1d711159deb5",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "vars": {
+    "RP_NAME": "TylerOS",
+    "RP_ID": "auth.tyleros.uk",
+    "ORIGIN": "https://auth.tyleros.uk",
+    "TURNSTILE_SITE_KEY": "0x4AAAAAAFQLItUA2BrquLpp",
+    "DMZ_ORIGIN": ""
+  }
 }

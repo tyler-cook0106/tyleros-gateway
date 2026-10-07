@@ -7,34 +7,23 @@
   <title>TylerOS</title>
   <link rel="icon" type="image/svg+xml" href="/TylerOS.svg">
   <link rel="stylesheet" href="/styles.css">
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
-
 <body>
   <main class="auth-card">
     <img class="brand-icon" src="/TylerOS White.svg" alt="TylerOS">
-
     <div class="wordmark">TylerOS</div>
 
-    <div class="connection">
-      <div class="spinner" id="spinner"></div>
+    <div id="turnstile" class="cf-turnstile"
+      data-action="login"
+      data-callback="onTurnstileSuccess"
+      data-expired-callback="onTurnstileExpired"
+      data-error-callback="onTurnstileError"></div>
 
-      <h1 id="title">Connecting to DMZ</h1>
-
-      <p id="status" class="status">
-        Establishing secure connection...
-      </p>
-
-      <div id="error" class="error-panel" hidden>
-        <div class="error-code" id="errorCode"></div>
-        <div class="error-message" id="errorMessage"></div>
-      </div>
-
-      <button id="retryButton" hidden onclick="window.location.reload()">
-        Retry connection
-      </button>
-    </div>
+    <button id="loginButton" disabled>Authenticate</button>
+    <p id="status" class="status" aria-live="polite"></p>
   </main>
 
-  <script src="/gateway.js"></script>
+  <script src="/auth.js"></script>
 </body>
 </html>
