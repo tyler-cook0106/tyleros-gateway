@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Wrangler / Cloudflare
+.wrangler/
+
+# Local environment / secrets
+.dev.vars
+.env
+.env.*
+!.env.example
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db

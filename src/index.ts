@@ -18,7 +18,8 @@ type Bindings = {
   TURNSTILE_SITE_KEY: string;
   TURNSTILE_SECRET_KEY: string;
   DMZ_ORIGIN: string;
-  DMZ_HANDOFF_SECRET: string;
+  DMZ_SIGNING_PRIVATE_KEY_JWK: string;
+  DMZ_SERVICE_PUBLIC_KEY_JWK: string;
 };
 
 type SessionStage = "cf" | "dmz";
@@ -31,6 +32,8 @@ const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const SESSION_LEASE_MS = 15 * 1000;
 const HEARTBEAT_MIN_INTERVAL_MS = 3 * 1000;
 const HANDOFF_TTL_MS = 2 * 60 * 1000;
+const DMZ_GRANT_TTL_MS = 2 * 60 * 1000;
+const DMZ_REQUEST_SKEW_MS = 60 * 1000;
 
 function base64url(bytes: Uint8Array): string {
   let binary = "";
@@ -50,6 +53,91 @@ async function sha256(value: string): Promise<string> {
     new TextEncoder().encode(value)
   );
   return base64url(new Uint8Array(digest));
+}
+
+async function sha256Bytes(value: string): Promise<Uint8Array> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value)
+  );
+  return new Uint8Array(digest);
+}
+
+async function importP256Key(jwkText: string, usages: KeyUsage[]): Promise<CryptoKey> {
+  const jwk = JSON.parse(jwkText) as JsonWebKey;
+  return crypto.subtle.importKey(
+    "jwk",
+    jwk,
+    { name: "ECDSA", namedCurve: "P-256" },
+    false,
+    usages
+  );
+}
+
+async function signP256(jwkText: string, value: string): Promise<string> {
+  const key = await importP256Key(jwkText, ["sign"]);
+  const signature = await crypto.subtle.sign(
+    { name: "ECDSA", hash: "SHA-256" },
+    key,
+    new TextEncoder().encode(value)
+  );
+  return base64url(new Uint8Array(signature));
+}
+
+async function verifyP256(
+  jwkText: string,
+  value: string,
+  signature: string
+): Promise<boolean> {
+  try {
+    const key = await importP256Key(jwkText, ["verify"]);
+    return await crypto.subtle.verify(
+      { name: "ECDSA", hash: "SHA-256" },
+      key,
+      base64urlToBytes(signature),
+      new TextEncoder().encode(value)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function base64urlToBytes(value: string): Uint8Array<ArrayBuffer> {
+  const padding = "=".repeat((4 - (value.length % 4)) % 4);
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/") + padding;
+  const binary = atob(padded);
+  const bytes = new Uint8Array(new ArrayBuffer(binary.length));
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(value);
+}
+
+function dmzRequestSigningPayload(
+  method: string,
+  path: string,
+  timestamp: string,
+  nonce: string,
+  body: string
+): Promise<string> {
+  return sha256(body).then((bodyHash) =>
+    [method.toUpperCase(), path, timestamp, nonce, bodyHash].join("\n")
+  );
+}
+
+function grantSigningPayload(grant: {
+  iss: string;
+  aud: string;
+  grantId: string;
+  devicePublicKey: JsonWebKey;
+  issuedAt: number;
+  expiresAt: number;
+}): string {
+  return stableJson(grant);
 }
 
 function getSessionToken(request: Request): string | null {
@@ -186,6 +274,51 @@ function clearSessionCookie(): string {
   ].join("; ");
 }
 
+
+async function verifyDmzServiceRequest(
+  request: Request,
+  env: Bindings,
+  body: string
+): Promise<boolean> {
+  if (!env.DMZ_SERVICE_PUBLIC_KEY_JWK) return false;
+
+  const timestamp = request.headers.get("X-TylerOS-DMZ-Timestamp");
+  const nonce = request.headers.get("X-TylerOS-DMZ-Nonce");
+  const signature = request.headers.get("X-TylerOS-DMZ-Signature");
+
+  if (!timestamp || !nonce || !signature) return false;
+
+  const timestampMs = Number(timestamp);
+  if (!Number.isFinite(timestampMs) || Math.abs(Date.now() - timestampMs) > DMZ_REQUEST_SKEW_MS) {
+    return false;
+  }
+
+  const payload = await dmzRequestSigningPayload(
+    request.method,
+    new URL(request.url).pathname,
+    timestamp,
+    nonce,
+    body
+  );
+
+  const valid = await verifyP256(
+    env.DMZ_SERVICE_PUBLIC_KEY_JWK,
+    payload,
+    signature
+  );
+
+  if (!valid) return false;
+
+  const nonceResult = await env.DB.prepare(
+    `INSERT INTO dmz_request_nonces (nonce, expires_at)
+     VALUES (?, ?)
+     ON CONFLICT(nonce) DO NOTHING`
+  )
+    .bind(nonce, Date.now() + DMZ_REQUEST_SKEW_MS)
+    .run();
+
+  return nonceResult.meta.changes === 1;
+}
 
 function authRedirect(): Response {
   return Response.redirect("https://auth.tyleros.uk/", 302);
@@ -582,35 +715,46 @@ app.get("/api/dmz/status", async (c) => {
   });
 });
 
-app.post("/api/dmz/handoff/consume", async (c) => {
-  const secret = c.env.DMZ_HANDOFF_SECRET;
-  const suppliedSecret = c.req.header("X-TylerOS-DMZ-Secret");
+app.post("/api/dmz/device/authorize", async (c) => {
+  const bodyText = await c.req.text();
 
-  if (!secret || !suppliedSecret || suppliedSecret !== secret) {
+  if (!(await verifyDmzServiceRequest(c.req.raw, c.env, bodyText))) {
     return c.json({
-      valid: false,
+      authorized: false,
       code: "DMZ_SERVICE_UNAUTHORISED",
     }, 401);
   }
 
-  let body: { handoffToken?: string };
+  let body: {
+    handoffToken?: string;
+    devicePublicKey?: JsonWebKey;
+  };
+
   try {
-    body = await c.req.json<{ handoffToken?: string }>();
+    body = JSON.parse(bodyText);
   } catch {
     return c.json({
-      valid: false,
+      authorized: false,
       code: "INVALID_REQUEST",
     }, 400);
   }
 
-  if (!body.handoffToken || typeof body.handoffToken !== "string") {
+  if (
+    typeof body.handoffToken !== "string" ||
+    !body.handoffToken ||
+    !body.devicePublicKey ||
+    body.devicePublicKey.kty !== "EC" ||
+    body.devicePublicKey.crv !== "P-256" ||
+    typeof body.devicePublicKey.x !== "string" ||
+    typeof body.devicePublicKey.y !== "string"
+  ) {
     return c.json({
-      valid: false,
-      code: "HANDOFF_REQUIRED",
+      authorized: false,
+      code: "DEVICE_KEY_REQUIRED",
     }, 400);
   }
 
-  const tokenHash = await sha256(body.handoffToken);
+  const handoffHash = await sha256(body.handoffToken);
   const now = Date.now();
 
   const handoff = await c.env.DB.prepare(
@@ -619,7 +763,7 @@ app.post("/api/dmz/handoff/consume", async (c) => {
      WHERE token_hash = ?
      LIMIT 1`
   )
-    .bind(tokenHash)
+    .bind(handoffHash)
     .first<{
       id: string;
       session_id: string;
@@ -627,9 +771,13 @@ app.post("/api/dmz/handoff/consume", async (c) => {
       used_at: number | null;
     }>();
 
-  if (!handoff || handoff.used_at !== null || handoff.expires_at <= now) {
+  if (
+    !handoff ||
+    handoff.used_at !== null ||
+    handoff.expires_at <= now
+  ) {
     return c.json({
-      valid: false,
+      authorized: false,
       code: "HANDOFF_INVALID",
     }, 401);
   }
@@ -655,31 +803,177 @@ app.post("/api/dmz/handoff/consume", async (c) => {
     session.last_seen_at + SESSION_LEASE_MS <= now
   ) {
     return c.json({
-      valid: false,
+      authorized: false,
       code: "CF_SESSION_EXPIRED",
     }, 401);
   }
 
-  const consumed = await c.env.DB.prepare(
-    `UPDATE handoffs
-     SET used_at = ?
-     WHERE id = ?
-       AND used_at IS NULL
-       AND expires_at > ?`
+  const grantId = crypto.randomUUID();
+  const issuedAt = now;
+  const expiresAt = now + DMZ_GRANT_TTL_MS;
+
+  const grant = {
+    iss: "auth.tyleros.uk",
+    aud: "tyleros-dmz",
+    grantId,
+    devicePublicKey: body.devicePublicKey,
+    issuedAt,
+    expiresAt,
+  };
+
+  const grantPayload = grantSigningPayload(grant);
+
+  if (!c.env.DMZ_SIGNING_PRIVATE_KEY_JWK) {
+    return c.json({
+      authorized: false,
+      code: "DMZ_SIGNING_KEY_NOT_CONFIGURED",
+    }, 503);
+  }
+
+  let signature: string;
+  try {
+    signature = await signP256(
+      c.env.DMZ_SIGNING_PRIVATE_KEY_JWK,
+      grantPayload
+    );
+  } catch (error) {
+    console.error("DMZ grant signing error:", error);
+    return c.json({
+      authorized: false,
+      code: "DMZ_SIGNING_ERROR",
+    }, 500);
+  }
+
+  await c.env.DB.prepare(
+    `INSERT INTO dmz_grants
+      (id, session_id, handoff_id, device_public_key, created_at, expires_at, used_at)
+     VALUES (?, ?, ?, ?, ?, ?, NULL)`
   )
-    .bind(now, handoff.id, now)
+    .bind(
+      grantId,
+      session.id,
+      handoff.id,
+      JSON.stringify(body.devicePublicKey),
+      issuedAt,
+      expiresAt
+    )
     .run();
 
-  if (!consumed.meta.changes) {
+  return c.json({
+    authorized: true,
+    grant: {
+      ...grant,
+      signature,
+    },
+  });
+});
+
+app.post("/api/dmz/grant/consume", async (c) => {
+  const bodyText = await c.req.text();
+
+  if (!(await verifyDmzServiceRequest(c.req.raw, c.env, bodyText))) {
     return c.json({
-      valid: false,
-      code: "HANDOFF_ALREADY_USED",
+      consumed: false,
+      code: "DMZ_SERVICE_UNAUTHORISED",
+    }, 401);
+  }
+
+  let body: { grantId?: string };
+
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    return c.json({
+      consumed: false,
+      code: "INVALID_REQUEST",
+    }, 400);
+  }
+
+  if (typeof body.grantId !== "string" || !body.grantId) {
+    return c.json({
+      consumed: false,
+      code: "GRANT_REQUIRED",
+    }, 400);
+  }
+
+  const now = Date.now();
+
+  const grant = await c.env.DB.prepare(
+    `SELECT id, session_id, expires_at, used_at
+     FROM dmz_grants
+     WHERE id = ?
+     LIMIT 1`
+  )
+    .bind(body.grantId)
+    .first<{
+      id: string;
+      session_id: string;
+      expires_at: number;
+      used_at: number | null;
+    }>();
+
+  if (!grant || grant.used_at !== null || grant.expires_at <= now) {
+    return c.json({
+      consumed: false,
+      code: "GRANT_INVALID",
+    }, 401);
+  }
+
+  const session = await c.env.DB.prepare(
+    `SELECT id, stage, expires_at, last_seen_at
+     FROM sessions
+     WHERE id = ?
+     LIMIT 1`
+  )
+    .bind(grant.session_id)
+    .first<{
+      id: string;
+      stage: SessionStage;
+      expires_at: number;
+      last_seen_at: number;
+    }>();
+
+  if (
+    !session ||
+    session.stage !== "cf" ||
+    session.expires_at <= now ||
+    session.last_seen_at + SESSION_LEASE_MS <= now
+  ) {
+    return c.json({
+      consumed: false,
+      code: "CF_SESSION_EXPIRED",
+    }, 401);
+  }
+
+  const results = await c.env.DB.batch([
+    c.env.DB.prepare(
+      `UPDATE dmz_grants
+       SET used_at = ?
+       WHERE id = ?
+         AND used_at IS NULL
+         AND expires_at > ?`
+    ).bind(now, grant.id, now),
+    c.env.DB.prepare(
+      `UPDATE sessions
+       SET stage = ?, last_seen_at = ?
+       WHERE id = ? AND stage = ?`
+    ).bind("dmz", now, session.id, "cf"),
+  ]);
+
+  if (
+    results.length !== 2 ||
+    results[0].meta.changes !== 1 ||
+    results[1].meta.changes !== 1
+  ) {
+    return c.json({
+      consumed: false,
+      code: "GRANT_ALREADY_USED",
     }, 409);
   }
 
   return c.json({
-    valid: true,
-    sessionId: session.id,
+    consumed: true,
+    stage: "dmz",
     expiresAt: session.expires_at,
   });
 });
