@@ -284,6 +284,13 @@ app.post("/api/login/verify", async (c) => {
   let verification: VerifiedAuthenticationResponse;
 
   try {
+    // D1/Cloudflare types can expose ArrayBufferLike here. SimpleWebAuthn
+    // requires a Uint8Array backed by a concrete ArrayBuffer. Copy the key
+    // into a fresh ArrayBuffer so the TypeScript and runtime types agree.
+    const storedPublicKey = new Uint8Array(credential.public_key);
+    const publicKeyBuffer = new ArrayBuffer(storedPublicKey.byteLength);
+    new Uint8Array(publicKeyBuffer).set(storedPublicKey);
+
     verification = await verifyAuthenticationResponse({
       response: body.response,
       expectedChallenge: challenge.challenge,
@@ -292,7 +299,7 @@ app.post("/api/login/verify", async (c) => {
       requireUserVerification: true,
       credential: {
         id: credential.credential_id,
-        publicKey: new Uint8Array(credential.public_key),
+        publicKey: new Uint8Array(publicKeyBuffer),
         counter: credential.counter,
         transports: credential.transports
           ? JSON.parse(credential.transports)
