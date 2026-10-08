@@ -239,112 +239,143 @@ app.post("/api/login/options", async (c) => {
 });
 
 app.post("/api/login/verify", async (c) => {
-  const body = await c.req.json<{
-    challengeId: string;
-    response: AuthenticationResponseJSON;
-    returnPath?: string;
-  }>();
-
-  const challenge = await c.env.DB.prepare(
-    `SELECT challenge, expires_at
-     FROM auth_challenges
-     WHERE id = ? AND type = ?`
-  )
-    .bind(body.challengeId, "authentication")
-    .first<{ challenge: string; expires_at: number }>();
-
-  if (!challenge) {
-    return c.json({ error: "Authentication challenge not found." }, 400);
-  }
-
-  if (challenge.expires_at < Date.now()) {
-    await c.env.DB.prepare("DELETE FROM auth_challenges WHERE id = ?")
-      .bind(body.challengeId)
-      .run();
-    return c.json({ error: "Authentication challenge expired." }, 400);
-  }
-
-  const credential = await c.env.DB.prepare(
-    `SELECT credential_id, public_key, counter, transports
-     FROM webauthn_credentials
-     WHERE credential_id = ?`
-  )
-    .bind(body.response.id)
-    .first<{
-      credential_id: string;
-      public_key: ArrayBuffer;
-      counter: number;
-      transports: string | null;
+  try {
+    const body = await c.req.json<{
+      challengeId: string;
+      response: AuthenticationResponseJSON;
+      returnPath?: string;
     }>();
 
-  if (!credential) {
-    return c.json({ error: "Passkey not recognised." }, 401);
-  }
+    const challenge = await c.env.DB.prepare(
+      `SELECT challenge, expires_at
+       FROM auth_challenges
+       WHERE id = ? AND type = ?`
+    )
+      .bind(body.challengeId, "authentication")
+      .first<{ challenge: string; expires_at: number }>();
 
-  let verification: VerifiedAuthenticationResponse;
+    if (!challenge) {
+      return c.json({ error: "Authentication challenge not found." }, 400);
+    }
 
-  try {
-    // D1/Cloudflare types can expose ArrayBufferLike here. SimpleWebAuthn
-    // requires a Uint8Array backed by a concrete ArrayBuffer. Copy the key
-    // into a fresh ArrayBuffer so the TypeScript and runtime types agree.
-    const storedPublicKey = new Uint8Array(credential.public_key);
-    const publicKeyBuffer = new ArrayBuffer(storedPublicKey.byteLength);
-    new Uint8Array(publicKeyBuffer).set(storedPublicKey);
+    if (challenge.expires_at < Date.now()) {
+      await c.env.DB.prepare("DELETE FROM auth_challenges WHERE id = ?")
+        .bind(body.challengeId)
+        .run();
+      return c.json({ error: "Authentication challenge expired." }, 400);
+    }
 
-    verification = await verifyAuthenticationResponse({
-      response: body.response,
-      expectedChallenge: challenge.challenge,
-      expectedOrigin: c.env.ORIGIN,
-      expectedRPID: c.env.RP_ID,
-      requireUserVerification: true,
-      credential: {
-        id: credential.credential_id,
-        publicKey: new Uint8Array(publicKeyBuffer),
-        counter: credential.counter,
-        transports: credential.transports
-          ? JSON.parse(credential.transports)
-          : undefined,
-      },
-    });
+    const credential = await c.env.DB.prepare(
+      `SELECT credential_id, public_key, counter, transports
+       FROM webauthn_credentials
+       WHERE credential_id = ?`
+    )
+      .bind(body.response.id)
+      .first<{
+        credential_id: string;
+        public_key: ArrayBuffer;
+        counter: number;
+        transports: string | null;
+      }>();
+
+    if (!credential) {
+      return c.json({ error: "Passkey not recognised." }, 401);
+    }
+
+    let verification: VerifiedAuthenticationResponse;
+
+    try {
+      // D1's ArrayBuffer typing can be ArrayBufferLike under newer Workers types.
+      // Copy it into a concrete ArrayBuffer before giving it to SimpleWebAuthn.
+      const storedPublicKey = new Uint8Array(credential.public_key);
+      const publicKeyBuffer = new ArrayBuffer(storedPublicKey.byteLength);
+      new Uint8Array(publicKeyBuffer).set(storedPublicKey);
+
+      let transports: any[] | undefined;
+      if (credential.transports) {
+        try {
+          const parsed = JSON.parse(credential.transports);
+          if (Array.isArray(parsed)) {
+            transports = parsed as AuthenticatorTransport[];
+          }
+        } catch (error) {
+          console.error("Stored WebAuthn transports JSON is invalid:", error);
+          return c.json({
+            error: "Stored passkey transport data is invalid.",
+            code: "WEBAUTHN_TRANSPORTS_ERROR",
+          }, 500);
+        }
+      }
+
+      verification = await verifyAuthenticationResponse({
+        response: body.response,
+        expectedChallenge: challenge.challenge,
+        expectedOrigin: c.env.ORIGIN,
+        expectedRPID: c.env.RP_ID,
+        requireUserVerification: true,
+        credential: {
+          id: credential.credential_id,
+          publicKey: new Uint8Array(publicKeyBuffer),
+          counter: credential.counter,
+          transports,
+        },
+      });
+    } catch (error) {
+      console.error("WebAuthn authentication error:", error);
+      const message = error instanceof Error ? error.message : String(error);
+      return c.json({
+        error: `Passkey verification failed: ${message}`,
+        code: "WEBAUTHN_VERIFY_ERROR",
+      }, 401);
+    }
+
+    if (!verification.verified) {
+      return c.json({ error: "Passkey verification failed." }, 401);
+    }
+
+    try {
+      await c.env.DB.prepare("DELETE FROM auth_challenges WHERE id = ?")
+        .bind(body.challengeId)
+        .run();
+
+      await c.env.DB.prepare(
+        `UPDATE webauthn_credentials
+         SET counter = ?
+         WHERE credential_id = ?`
+      )
+        .bind(
+          verification.authenticationInfo.newCounter,
+          credential.credential_id
+        )
+        .run();
+
+      const token = await createSession(c.env, "cf");
+
+      return c.json({
+        verified: true,
+        returnPath: safeReturnPath(body.returnPath ?? null),
+        setCookie: sessionCookie(token),
+      }, {
+        headers: {
+          "Set-Cookie": sessionCookie(token),
+        },
+      });
+    } catch (error) {
+      console.error("Authentication session persistence error:", error);
+      const message = error instanceof Error ? error.message : String(error);
+      return c.json({
+        error: `Authentication succeeded but the session could not be created: ${message}`,
+        code: "AUTH_SESSION_ERROR",
+      }, 500);
+    }
   } catch (error) {
-    console.error("WebAuthn authentication error:", error);
+    console.error("Authentication verification route error:", error);
     const message = error instanceof Error ? error.message : String(error);
     return c.json({
-      error: `Passkey verification failed: ${message}`,
-      code: "WEBAUTHN_VERIFY_ERROR",
-    }, 401);
+      error: `Authentication verification internal error: ${message}`,
+      code: "AUTH_VERIFY_INTERNAL_ERROR",
+    }, 500);
   }
-
-  await c.env.DB.prepare("DELETE FROM auth_challenges WHERE id = ?")
-    .bind(body.challengeId)
-    .run();
-
-  if (!verification.verified) {
-    return c.json({ error: "Passkey verification failed." }, 401);
-  }
-
-  await c.env.DB.prepare(
-    `UPDATE webauthn_credentials
-     SET counter = ?
-     WHERE credential_id = ?`
-  )
-    .bind(
-      verification.authenticationInfo.newCounter,
-      credential.credential_id
-    )
-    .run();
-
-  const token = await createSession(c.env, "cf");
-
-  return c.json({
-    verified: true,
-    returnPath: safeReturnPath(body.returnPath ?? null),
-    setCookie: sessionCookie(token),
-  }, {
-    headers: {
-      "Set-Cookie": sessionCookie(token),
-    },
-  });
 });
 
 app.post("/api/logout", async (c) => {
