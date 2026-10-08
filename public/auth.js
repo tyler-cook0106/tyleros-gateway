@@ -52,10 +52,50 @@ window.onTurnstileError = () => {
 };
 
 function base64urlToUint8Array(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError("Expected a non-empty base64url string.");
+  }
+
+  // WebAuthn IDs/challenges are base64url. Reject malformed values here so
+  // the browser does not surface a vague DOMException such as
+  // “String did not match the expected pattern.”
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw new TypeError("Invalid base64url WebAuthn value.");
+  }
+
   const padding = "=".repeat((4 - (value.length % 4)) % 4);
   const base64 = (value + padding).replace(/-/g, "+").replace(/_/g, "/");
   const binary = atob(base64);
   return Uint8Array.from(binary, char => char.charCodeAt(0));
+}
+
+function buildWebAuthnRequestOptions(options) {
+  if (!options || typeof options !== "object") {
+    throw new TypeError("Authentication options were not returned.");
+  }
+
+  // Modern Chromium/Edge implement the WebAuthn JSON conversion helpers.
+  // Let the browser perform the standards-defined conversion rather than
+  // constructing BufferSource values by hand.
+  if (typeof PublicKeyCredential !== "undefined" &&
+      typeof PublicKeyCredential.parseRequestOptionsFromJSON === "function") {
+    return PublicKeyCredential.parseRequestOptionsFromJSON(options);
+  }
+
+  const publicKey = {
+    ...options,
+    challenge: base64urlToUint8Array(options.challenge),
+    allowCredentials: (options.allowCredentials || []).map((credential) => ({
+      ...credential,
+      id: base64urlToUint8Array(credential.id),
+    })),
+  };
+
+  if (options.rpId && typeof options.rpId !== "string") {
+    throw new TypeError("Invalid WebAuthn RP ID.");
+  }
+
+  return publicKey;
 }
 
 function uint8ArrayToBase64url(value) {
@@ -133,18 +173,30 @@ loginButton.addEventListener("click", async () => {
       throw new Error(optionsData.error || "Could not start authentication.");
     }
 
-    const publicKey = {
-      ...optionsData.options,
-      challenge: base64urlToUint8Array(optionsData.options.challenge),
-      allowCredentials: (optionsData.options.allowCredentials || []).map(
-        credential => ({
-          ...credential,
-          id: base64urlToUint8Array(credential.id)
-        })
-      )
-    };
+    let publicKey;
+    try {
+      publicKey = buildWebAuthnRequestOptions(optionsData.options);
+    } catch (error) {
+      console.error("Invalid WebAuthn authentication options:", optionsData.options, error);
+      throw new Error("The passkey authentication request was invalid. Please try again.");
+    }
 
-    const credential = await navigator.credentials.get({ publicKey });
+    let credential;
+    try {
+      credential = await navigator.credentials.get({ publicKey });
+    } catch (error) {
+      console.error("WebAuthn browser request failed:", error);
+
+      if (error?.name === "NotAllowedError") {
+        throw new Error("Passkey authentication was cancelled or not completed.");
+      }
+
+      if (error?.name === "SecurityError") {
+        throw new Error("This passkey cannot be used from the current TylerOS authentication origin.");
+      }
+
+      throw new Error("The passkey authentication request could not be started. Please try again.");
+    }
 
     if (!credential) {
       throw new Error("Passkey authentication was cancelled.");
