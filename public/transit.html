@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <title>TylerOS — Connecting</title>
+  <link rel="icon" type="image/svg+xml" href="/TylerOS.svg">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="auth-card">
+    <img class="brand-icon" src="/TylerOS White.svg" alt="TylerOS">
+    <div class="wordmark">TylerOS</div>
+
+    <section class="connection" aria-live="polite">
+      <h1 id="title">Connecting to TylerOS</h1>
+
+      <div class="progress-list">
+        <div class="progress-step complete">
+          <span class="progress-icon">✓</span>
+          <span>Authentication</span>
+        </div>
+        <div class="progress-step active" id="dmzStep">
+          <span class="progress-icon" id="dmzIcon">◌</span>
+          <span id="dmzLabel">Connecting to DMZ</span>
+        </div>
+        <div class="progress-step" id="serverStep">
+          <span class="progress-icon" id="serverIcon">○</span>
+          <span id="serverLabel">TylerOS server</span>
+        </div>
+      </div>
+
+      <div class="spinner" id="spinner"></div>
+      <p class="status" id="status">Establishing the secure DMZ connection…</p>
+
+      <div class="error-panel" id="error" hidden>
+        <div class="error-code" id="errorCode">DMZ_CONNECTION_FAILED</div>
+        <div class="error-message" id="errorMessage"></div>
+      </div>
+
+      <button id="retryButton" hidden>Try again</button>
+    </section>
+  </main>
+
+  <script src="/transit.js?v=20261008-1"></script>
+</body>
+</html>

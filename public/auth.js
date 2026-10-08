@@ -228,7 +228,7 @@ loginButton.addEventListener("click", async () => {
       throw new Error(result.error || "Passkey verification failed.");
     }
 
-    const target = new URL("https://tyleros.uk/dmz/ingress");
+    const target = new URL("https://tyleros.uk/transit");
     target.searchParams.set("return", result.returnPath || safeReturnPath(returnPath));
     window.location.replace(target.toString());
   } catch (error) {

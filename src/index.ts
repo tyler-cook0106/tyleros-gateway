@@ -545,16 +545,16 @@ app.get("/api/dmz/status", async (c) => {
   }
 });
 
-app.get("/dmz/ingress", async (c) => {
+app.get("/transit", async (c) => {
   const session = await getSession(c.req.raw, c.env);
 
   if (!session) {
-    return authRedirect("/dmz/ingress");
+    return authRedirect("/transit");
   }
 
-  const ingress = new URL(c.req.url);
-  ingress.pathname = "/dmz-ingress.html";
-  return c.env.ASSETS.fetch(new Request(ingress.toString(), c.req.raw));
+  const transit = new URL(c.req.url);
+  transit.pathname = "/transit.html";
+  return c.env.ASSETS.fetch(new Request(transit.toString(), c.req.raw));
 });
 
 app.all("*", async (c) => {
@@ -572,7 +572,7 @@ app.all("*", async (c) => {
     }
 
     if (session.stage !== "dmz") {
-      const target = new URL("/dmz/ingress", c.req.url);
+      const target = new URL("/transit", c.req.url);
       target.searchParams.set(
         "return",
         new URL(c.req.url).pathname + new URL(c.req.url).search

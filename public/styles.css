@@ -172,3 +172,40 @@ button:disabled {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+.progress-list {
+  width: 100%;
+  margin: 22px 0 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.progress-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: rgba(245, 240, 229, 0.38);
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: left;
+}
+
+.progress-icon {
+  width: 20px;
+  flex: 0 0 20px;
+  text-align: center;
+  font-weight: 700;
+}
+
+.progress-step.complete {
+  color: #f5f0e5;
+}
+
+.progress-step.active {
+  color: rgba(245, 240, 229, 0.82);
+}
+
+.progress-step.failed {
+  color: #e7a0a0;
+}
