@@ -18,6 +18,7 @@ type Bindings = {
   TURNSTILE_SITE_KEY: string;
   TURNSTILE_SECRET_KEY: string;
   DMZ_ORIGIN: string;
+  DMZ_HANDOFF_SECRET: string;
 };
 
 type SessionStage = "cf" | "dmz";
@@ -25,6 +26,7 @@ type SessionStage = "cf" | "dmz";
 const app = new Hono<{ Bindings: Bindings }>();
 
 const SESSION_COOKIE = "tyleros_session";
+const HANDOFF_COOKIE = "tyleros_handoff";
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const SESSION_LEASE_MS = 15 * 1000;
 const HEARTBEAT_MIN_INTERVAL_MS = 3 * 1000;
@@ -104,7 +106,24 @@ async function createSession(env: Bindings, stage: SessionStage) {
     .bind(id, tokenHash, stage, now, now + SESSION_TTL_MS, now)
     .run();
 
-  return token;
+  return { token, id };
+}
+
+async function createHandoff(env: Bindings, sessionId: string) {
+  const token = randomToken();
+  const tokenHash = await sha256(token);
+  const id = crypto.randomUUID();
+  const now = Date.now();
+
+  await env.DB.prepare(
+    `INSERT INTO handoffs
+      (id, token_hash, session_id, created_at, expires_at, used_at)
+     VALUES (?, ?, ?, ?, ?, NULL)`
+  )
+    .bind(id, tokenHash, sessionId, now, now + HANDOFF_TTL_MS)
+    .run();
+
+  return { token, id };
 }
 
 function sessionCookie(token: string): string {
@@ -117,6 +136,42 @@ function sessionCookie(token: string): string {
     "SameSite=Lax",
     `Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
   ].join("; ");
+}
+
+function handoffCookie(token: string): string {
+  return [
+    `${HANDOFF_COOKIE}=${token}`,
+    "Path=/",
+    "Domain=.tyleros.uk",
+    "HttpOnly",
+    "Secure",
+    "SameSite=Lax",
+    `Max-Age=${Math.floor(HANDOFF_TTL_MS / 1000)}`,
+  ].join("; ");
+}
+
+function clearHandoffCookie(): string {
+  return [
+    `${HANDOFF_COOKIE}=`,
+    "Path=/",
+    "Domain=.tyleros.uk",
+    "HttpOnly",
+    "Secure",
+    "SameSite=Lax",
+    "Max-Age=0",
+  ].join("; ");
+}
+
+function getHandoffToken(request: Request): string | null {
+  const cookie = request.headers.get("Cookie");
+  if (!cookie) return null;
+
+  for (const part of cookie.split(";")) {
+    const [name, ...valueParts] = part.trim().split("=");
+    if (name === HANDOFF_COOKIE) return valueParts.join("=") || null;
+  }
+
+  return null;
 }
 
 function clearSessionCookie(): string {
@@ -341,15 +396,17 @@ app.post("/api/login/verify", async (c) => {
         )
         .run();
 
-      const token = await createSession(c.env, "cf");
+      const session = await createSession(c.env, "cf");
+      const handoff = await createHandoff(c.env, session.id);
 
       return c.json({
         verified: true,
-        setCookie: sessionCookie(token),
+        setCookie: sessionCookie(session.token),
       }, {
-        headers: {
-          "Set-Cookie": sessionCookie(token),
-        },
+        headers: [
+          ["Set-Cookie", sessionCookie(session.token)],
+          ["Set-Cookie", handoffCookie(handoff.token)],
+        ],
       });
     } catch (error) {
       console.error("Authentication session persistence error:", error);
@@ -461,7 +518,7 @@ app.post("/api/heartbeat", async (c) => {
 app.get("/api/dmz/status", async (c) => {
   const session = await getSession(c.req.raw, c.env);
 
-  if (!session || (session.stage !== "cf" && session.stage !== "dmz")) {
+  if (!session || session.stage !== "cf") {
     return c.json({
       connected: false,
       authenticated: false,
@@ -469,71 +526,162 @@ app.get("/api/dmz/status", async (c) => {
     }, 401);
   }
 
-  if (session.stage === "dmz") {
+  const handoffToken = getHandoffToken(c.req.raw);
+  if (!handoffToken) {
     return c.json({
-      connected: true,
+      connected: false,
       authenticated: true,
-      tunnel: true,
-      dmz: true,
-      stage: "dmz",
+      code: "DMZ_HANDOFF_NOT_AVAILABLE",
+      message: "The DMZ handoff is not available. Please authenticate again.",
+    }, 409);
+  }
+
+  const tokenHash = await sha256(handoffToken);
+  const handoff = await c.env.DB.prepare(
+    `SELECT id, session_id, expires_at, used_at
+     FROM handoffs
+     WHERE token_hash = ?
+     LIMIT 1`
+  )
+    .bind(tokenHash)
+    .first<{
+      id: string;
+      session_id: string;
+      expires_at: number;
+      used_at: number | null;
+    }>();
+
+  if (
+    !handoff ||
+    handoff.session_id !== session.id ||
+    handoff.used_at !== null ||
+    handoff.expires_at <= Date.now()
+  ) {
+    return c.json({
+      connected: false,
+      authenticated: true,
+      code: "DMZ_HANDOFF_INVALID",
+      message: "The DMZ handoff is invalid or has expired. Please authenticate again.",
+    }, 409, {
+      "Set-Cookie": clearHandoffCookie(),
     });
   }
 
-  if (!c.env.DMZ_ORIGIN) {
+  return c.json({
+    connected: true,
+    authenticated: true,
+    tunnel: true,
+    dmz: false,
+    stage: "cf",
+    handoffUrl: `https://dmz.tyleros.uk/userauth?handoff=${encodeURIComponent(handoffToken)}`,
+    handoffExpiresAt: handoff.expires_at,
+  }, {
+    headers: {
+      "Set-Cookie": clearHandoffCookie(),
+    },
+  });
+});
+
+app.post("/api/dmz/handoff/consume", async (c) => {
+  const secret = c.env.DMZ_HANDOFF_SECRET;
+  const suppliedSecret = c.req.header("X-TylerOS-DMZ-Secret");
+
+  if (!secret || !suppliedSecret || suppliedSecret !== secret) {
     return c.json({
-      connected: false,
-      authenticated: false,
-      tunnel: false,
-      code: "DMZ_ORIGIN_NOT_CONFIGURED",
-      message: "The Cloudflare-to-DMZ origin has not been configured yet.",
-    }, 503);
+      valid: false,
+      code: "DMZ_SERVICE_UNAUTHORISED",
+    }, 401);
   }
 
+  let body: { handoffToken?: string };
   try {
-    const origin = new URL(c.env.DMZ_ORIGIN);
-    const target = new URL("/health", origin);
-
-    const response = await fetch(new Request(target.toString(), {
-      method: "GET",
-      headers: {
-        "Accept": "application/json",
-        "X-TylerOS-Gateway": "tyleros-gateway",
-      },
-    }));
-
-    if (!response.ok) {
-      return c.json({
-        connected: false,
-        authenticated: false,
-        tunnel: false,
-        code: `DMZ_HTTP_${response.status}`,
-        message: "The DMZ origin returned an error.",
-      }, 502);
-    }
-
-    const dmzToken = await createSession(c.env, "dmz");
-
+    body = await c.req.json<{ handoffToken?: string }>();
+  } catch {
     return c.json({
-      connected: true,
-      authenticated: true,
-      tunnel: true,
-      dmz: true,
-      stage: "dmz",
-    }, {
-      headers: {
-        "Set-Cookie": sessionCookie(dmzToken),
-      },
-    });
-  } catch (error) {
-    console.error("DMZ connection error:", error);
-    return c.json({
-      connected: false,
-      authenticated: false,
-      tunnel: false,
-      code: "DMZ_CONNECTION_FAILED",
-      message: "The DMZ connection could not be established.",
-    }, 502);
+      valid: false,
+      code: "INVALID_REQUEST",
+    }, 400);
   }
+
+  if (!body.handoffToken || typeof body.handoffToken !== "string") {
+    return c.json({
+      valid: false,
+      code: "HANDOFF_REQUIRED",
+    }, 400);
+  }
+
+  const tokenHash = await sha256(body.handoffToken);
+  const now = Date.now();
+
+  const handoff = await c.env.DB.prepare(
+    `SELECT id, session_id, expires_at, used_at
+     FROM handoffs
+     WHERE token_hash = ?
+     LIMIT 1`
+  )
+    .bind(tokenHash)
+    .first<{
+      id: string;
+      session_id: string;
+      expires_at: number;
+      used_at: number | null;
+    }>();
+
+  if (!handoff || handoff.used_at !== null || handoff.expires_at <= now) {
+    return c.json({
+      valid: false,
+      code: "HANDOFF_INVALID",
+    }, 401);
+  }
+
+  const session = await c.env.DB.prepare(
+    `SELECT id, stage, expires_at, last_seen_at
+     FROM sessions
+     WHERE id = ?
+     LIMIT 1`
+  )
+    .bind(handoff.session_id)
+    .first<{
+      id: string;
+      stage: SessionStage;
+      expires_at: number;
+      last_seen_at: number;
+    }>();
+
+  if (
+    !session ||
+    session.stage !== "cf" ||
+    session.expires_at <= now ||
+    session.last_seen_at + SESSION_LEASE_MS <= now
+  ) {
+    return c.json({
+      valid: false,
+      code: "CF_SESSION_EXPIRED",
+    }, 401);
+  }
+
+  const consumed = await c.env.DB.prepare(
+    `UPDATE handoffs
+     SET used_at = ?
+     WHERE id = ?
+       AND used_at IS NULL
+       AND expires_at > ?`
+  )
+    .bind(now, handoff.id, now)
+    .run();
+
+  if (!consumed.meta.changes) {
+    return c.json({
+      valid: false,
+      code: "HANDOFF_ALREADY_USED",
+    }, 409);
+  }
+
+  return c.json({
+    valid: true,
+    sessionId: session.id,
+    expiresAt: session.expires_at,
+  });
 });
 
 const TRANSIT_HTML = `<!doctype html>
@@ -640,12 +788,25 @@ const TRANSIT_HTML = `<!doctype html>
 
         await checkDmz();
 
+        const handoffResponse = await fetch("/api/dmz/status", {
+          method: "GET",
+          cache: "no-store",
+          headers: { Accept: "application/json" }
+        });
+        const handoff = await handoffResponse.json().catch(() => ({}));
+
+        if (!handoffResponse.ok || !handoff.handoffUrl) {
+          throw new Error(
+            handoff.message || "A valid DMZ handoff could not be created."
+          );
+        }
+
         dmzStep.className = "step complete";
         dmzIcon.textContent = "✓";
         dmzLabel.textContent = "DMZ reachable";
         title.textContent = "DMZ connected";
         status.textContent = "Redirecting to DMZ authentication…";
-        location.replace(DMZ_URL);
+        location.replace(handoff.handoffUrl);
       } catch (e) {
         if (e?.name === "AbortError") {
           fail("DMZ_TIMEOUT", "The DMZ did not respond within 6 seconds. The tunnel may be offline.");

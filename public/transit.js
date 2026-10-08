@@ -81,11 +81,26 @@ async function connect() {
 
     await probeDmz();
 
+    const handoffResponse = await fetch("/api/dmz/status", {
+      method: "GET",
+      cache: "no-store",
+      headers: { "Accept": "application/json" }
+    });
+    const handoff = await handoffResponse.json().catch(() => ({}));
+
+    if (!handoffResponse.ok || !handoff.handoffUrl) {
+      const error = new Error(
+        handoff.message || "A valid DMZ handoff could not be created."
+      );
+      error.code = handoff.code || "DMZ_HANDOFF_UNAVAILABLE";
+      throw error;
+    }
+
     setStep(dmzStep, "complete", dmzIcon, dmzLabel);
     title.textContent = "DMZ connected";
     status.textContent = "Handing off to DMZ authentication…";
 
-    window.location.replace(DMZ_URL);
+    window.location.replace(handoff.handoffUrl);
   } catch (err) {
     console.error("DMZ transit failed:", err);
 
