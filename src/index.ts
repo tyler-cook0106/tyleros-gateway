@@ -536,6 +536,130 @@ app.get("/api/dmz/status", async (c) => {
   }
 });
 
+const TRANSIT_HTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <title>TylerOS — Connecting</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111; color: #f5f5f5; font-family: system-ui, sans-serif; }
+    .card { width: min(520px, calc(100% - 40px)); padding: 32px; border: 1px solid #333; border-radius: 16px; background: #181818; box-sizing: border-box; }
+    .brand { font-weight: 700; font-size: 24px; margin-bottom: 28px; }
+    h1 { font-size: 22px; margin: 0 0 12px; }
+    .status { color: #bbb; line-height: 1.5; }
+    .steps { display: grid; gap: 12px; margin: 24px 0; }
+    .step { display: flex; gap: 12px; align-items: center; color: #888; }
+    .step.complete, .step.active { color: #f5f5f5; }
+    .icon { width: 24px; text-align: center; }
+    .spinner { width: 22px; height: 22px; margin: 20px 0; border: 3px solid #444; border-top-color: #fff; border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .error { margin-top: 20px; padding: 14px; border: 1px solid #633; border-radius: 10px; background: #241414; }
+    .code { font-family: monospace; font-weight: 700; margin-bottom: 6px; }
+    button { margin-top: 18px; padding: 10px 16px; border: 0; border-radius: 8px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="brand">TylerOS</div>
+    <section aria-live="polite">
+      <h1 id="title">Connecting to TylerOS</h1>
+      <div class="steps">
+        <div class="step complete"><span class="icon">✓</span><span>Authentication</span></div>
+        <div class="step active" id="dmzStep"><span class="icon" id="dmzIcon">◌</span><span id="dmzLabel">Checking DMZ</span></div>
+        <div class="step" id="serverStep"><span class="icon">○</span><span>TylerOS server</span></div>
+      </div>
+      <div class="spinner" id="spinner"></div>
+      <p class="status" id="status">Checking whether the DMZ is reachable…</p>
+      <div class="error" id="error" hidden>
+        <div class="code" id="errorCode"></div>
+        <div id="errorMessage"></div>
+      </div>
+      <button id="retryButton" hidden>Try again</button>
+    </section>
+  </main>
+  <script>
+    const DMZ_URL = "https://dmz.tyleros.uk/userauth";
+    const TIMEOUT_MS = 6000;
+    const title = document.getElementById("title");
+    const status = document.getElementById("status");
+    const spinner = document.getElementById("spinner");
+    const error = document.getElementById("error");
+    const errorCode = document.getElementById("errorCode");
+    const errorMessage = document.getElementById("errorMessage");
+    const retryButton = document.getElementById("retryButton");
+    const dmzStep = document.getElementById("dmzStep");
+    const dmzIcon = document.getElementById("dmzIcon");
+    const dmzLabel = document.getElementById("dmzLabel");
+
+    function fail(code, message) {
+      spinner.hidden = true;
+      title.textContent = "Unable to continue";
+      status.textContent = "Your TylerOS authentication is valid, but the DMZ could not be reached.";
+      errorCode.textContent = code;
+      errorMessage.textContent = message;
+      error.hidden = false;
+      retryButton.hidden = false;
+      dmzStep.className = "step";
+      dmzIcon.textContent = "✕";
+      dmzLabel.textContent = "DMZ unreachable";
+    }
+
+    retryButton.addEventListener("click", () => location.reload());
+
+    async function checkDmz() {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+      try {
+        // no-cors deliberately tests network reachability without requiring the DMZ
+        // service to expose CORS headers to tyleros.uk. Any network response means
+        // the DMZ endpoint is reachable; a network failure means it is not.
+        await fetch(DMZ_URL, { mode: "no-cors", cache: "no-store", signal: controller.signal });
+        return true;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    async function start() {
+      try {
+        const sessionResponse = await fetch("/api/session", { cache: "no-store", headers: { Accept: "application/json" } });
+        const session = await sessionResponse.json();
+
+        if (!sessionResponse.ok || !session.authenticated) {
+          location.replace("https://auth.tyleros.uk/");
+          return;
+        }
+
+        dmzStep.className = "step active";
+        dmzIcon.textContent = "◌";
+        dmzLabel.textContent = "Checking DMZ";
+        status.textContent = "Checking whether the DMZ is reachable…";
+
+        await checkDmz();
+
+        dmzStep.className = "step complete";
+        dmzIcon.textContent = "✓";
+        dmzLabel.textContent = "DMZ reachable";
+        title.textContent = "DMZ connected";
+        status.textContent = "Redirecting to DMZ authentication…";
+        location.replace(DMZ_URL);
+      } catch (e) {
+        if (e?.name === "AbortError") {
+          fail("DMZ_TIMEOUT", "The DMZ did not respond within 6 seconds. The tunnel may be offline.");
+        } else {
+          fail("DMZ_UNREACHABLE", "The DMZ could not be reached. You can retry when the tunnel is available.");
+        }
+      }
+    }
+
+    start();
+  </script>
+</body>
+</html>`;
+
 app.get("/transit", async (c) => {
   const session = await getSession(c.req.raw, c.env);
 
@@ -543,9 +667,9 @@ app.get("/transit", async (c) => {
     return authRedirect();
   }
 
-  const transit = new URL(c.req.url);
-  transit.pathname = "/transit.html";
-  return c.env.ASSETS.fetch(new Request(transit.toString(), c.req.raw));
+  return new Response(TRANSIT_HTML, {
+    headers: { "Content-Type": "text/html; charset=UTF-8", "Cache-Control": "no-store" },
+  });
 });
 
 app.all("*", async (c) => {
@@ -556,21 +680,6 @@ app.all("*", async (c) => {
   }
 
   if (hostname === "tyleros.uk") {
-    // Transit is a protected page, but its static assets must be served
-    // without re-entering the page's authentication redirect.
-    const pathname = new URL(c.req.url).pathname;
-    const transitAssets = new Set([
-      "/transit.js",
-      "/styles.css",
-      "/TylerOS.svg",
-      "/TylerOS White.svg",
-      "/favicon.ico",
-    ]);
-
-    if (transitAssets.has(pathname)) {
-      return c.env.ASSETS.fetch(c.req.raw);
-    }
-
     const session = await getSession(c.req.raw, c.env);
 
     if (!session) {
