@@ -125,6 +125,16 @@ function safeReturnPath(value) {
   return value;
 }
 
+async function readJsonResponse(response, label) {
+  const text = await response.text();
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch (error) {
+    console.error(`${label} returned non-JSON`, { status: response.status, contentType: response.headers.get("content-type"), body: text.slice(0, 500) }, error);
+    throw new Error(`${label} returned an invalid response.`);
+  }
+}
+
 async function initialiseTurnstile() {
   if (!window.turnstile) {
     setTimeout(initialiseTurnstile, 100);
@@ -133,7 +143,7 @@ async function initialiseTurnstile() {
 
   try {
     const response = await fetch("/api/config", { cache: "no-store" });
-    const config = await response.json();
+    const config = await readJsonResponse(response, "TylerOS configuration");
 
     if (!config.turnstileSiteKey) {
       setStatus("Turnstile site key is not configured.", "error");
@@ -167,7 +177,7 @@ loginButton.addEventListener("click", async () => {
       body: JSON.stringify({ turnstileToken })
     });
 
-    const optionsData = await optionsResponse.json();
+    const optionsData = await readJsonResponse(optionsResponse, "Authentication options");
 
     if (!optionsResponse.ok) {
       throw new Error(optionsData.error || "Could not start authentication.");
@@ -212,7 +222,7 @@ loginButton.addEventListener("click", async () => {
       })
     });
 
-    const result = await verifyResponse.json();
+    const result = await readJsonResponse(verifyResponse, "Authentication verification");
 
     if (!verifyResponse.ok || !result.verified) {
       throw new Error(result.error || "Passkey verification failed.");
