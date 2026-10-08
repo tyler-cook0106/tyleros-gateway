@@ -131,16 +131,9 @@ function clearSessionCookie(): string {
   ].join("; ");
 }
 
-function safeReturnPath(value: string | null): string {
-  if (!value) return "/";
-  if (!value.startsWith("/") || value.startsWith("//")) return "/";
-  return value;
-}
 
-function authRedirect(returnPath: string): Response {
-  const url = new URL("https://auth.tyleros.uk/");
-  url.searchParams.set("return", returnPath);
-  return Response.redirect(url.toString(), 302);
+function authRedirect(): Response {
+  return Response.redirect("https://auth.tyleros.uk/", 302);
 }
 
 async function verifyTurnstile(
@@ -243,7 +236,6 @@ app.post("/api/login/verify", async (c) => {
     const body = await c.req.json<{
       challengeId: string;
       response: AuthenticationResponseJSON;
-      returnPath?: string;
     }>();
 
     const challenge = await c.env.DB.prepare(
@@ -353,7 +345,6 @@ app.post("/api/login/verify", async (c) => {
 
       return c.json({
         verified: true,
-        returnPath: safeReturnPath(body.returnPath ?? null),
         setCookie: sessionCookie(token),
       }, {
         headers: {
@@ -549,7 +540,7 @@ app.get("/transit", async (c) => {
   const session = await getSession(c.req.raw, c.env);
 
   if (!session) {
-    return authRedirect("/transit");
+    return authRedirect();
   }
 
   const transit = new URL(c.req.url);
@@ -568,16 +559,11 @@ app.all("*", async (c) => {
     const session = await getSession(c.req.raw, c.env);
 
     if (!session) {
-      return authRedirect(new URL(c.req.url).pathname + new URL(c.req.url).search);
+      return authRedirect();
     }
 
     if (session.stage !== "dmz") {
-      const target = new URL("/transit", c.req.url);
-      target.searchParams.set(
-        "return",
-        new URL(c.req.url).pathname + new URL(c.req.url).search
-      );
-      return Response.redirect(target.toString(), 302);
+      return Response.redirect(new URL("/transit", c.req.url).toString(), 302);
     }
 
     return c.env.ASSETS.fetch(c.req.raw);

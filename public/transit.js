@@ -10,10 +10,7 @@ const dmzStep = document.getElementById("dmzStep");
 const dmzIcon = document.getElementById("dmzIcon");
 const dmzLabel = document.getElementById("dmzLabel");
 
-const params = new URLSearchParams(window.location.search);
-const returnPath = params.get("return") || "/home";
 const DMZ_URL = "https://dmz.tyleros.uk/userauth";
-const DMZ_PROBE_URL = "https://dmz.tyleros.uk/userauth/health";
 const PROBE_TIMEOUT_MS = 6000;
 
 function setStep(step, state, icon, label) {
@@ -43,22 +40,19 @@ async function probeDmz() {
   const timeout = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
 
   try {
-    const response = await fetch(DMZ_PROBE_URL, {
+    const response = await fetch("/api/dmz/status", {
       method: "GET",
-      mode: "cors",
-      credentials: "include",
       cache: "no-store",
-      headers: {
-        "Accept": "application/json",
-        "X-TylerOS-Probe": "transit"
-      },
+      headers: { "Accept": "application/json" },
       signal: controller.signal
     });
 
     const result = await response.json().catch(() => ({}));
 
-    if (!response.ok || result.ready !== true) {
-      throw new Error(result.message || `DMZ returned HTTP ${response.status}.`);
+    if (!response.ok || result.connected !== true) {
+      const error = new Error(result.message || "The DMZ connection could not be established.");
+      error.code = result.code || "DMZ_UNREACHABLE";
+      throw error;
     }
 
     return true;
@@ -78,9 +72,7 @@ async function connect() {
     const session = await response.json();
 
     if (!response.ok || !session.authenticated) {
-      window.location.replace(
-        `https://auth.tyleros.uk/?return=${encodeURIComponent(returnPath)}`
-      );
+      window.location.replace("https://auth.tyleros.uk/");
       return;
     }
 
@@ -93,9 +85,7 @@ async function connect() {
     title.textContent = "DMZ connected";
     status.textContent = "Handing off to DMZ authentication…";
 
-    const target = new URL(DMZ_URL);
-    target.searchParams.set("return", returnPath);
-    window.location.replace(target.toString());
+    window.location.replace(DMZ_URL);
   } catch (err) {
     console.error("DMZ transit failed:", err);
 
@@ -106,8 +96,8 @@ async function connect() {
       );
     } else {
       showError(
-        "DMZ_UNREACHABLE",
-        "The DMZ tunnel could not be reached. The connection will remain at this stage."
+        err?.code || "DMZ_UNREACHABLE",
+        err?.message || "The DMZ tunnel could not be reached. The connection will remain at this stage."
       );
     }
   }

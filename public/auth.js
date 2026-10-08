@@ -7,8 +7,6 @@ let turnstileWidgetId = null;
 let turnstileAutoRetryUsed = false;
 let turnstileResetTimer = null;
 
-const params = new URLSearchParams(window.location.search);
-const returnPath = params.get("return") || "/";
 
 function setStatus(message, type = "") {
   status.textContent = message;
@@ -120,10 +118,6 @@ function serializeCredential(credential) {
   };
 }
 
-function safeReturnPath(value) {
-  if (!value || !value.startsWith("/") || value.startsWith("//")) return "/";
-  return value;
-}
 
 async function readJsonResponse(response, label) {
   const text = await response.text();
@@ -217,8 +211,7 @@ loginButton.addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         challengeId: optionsData.challengeId,
-        response: serializeCredential(credential),
-        returnPath: safeReturnPath(returnPath)
+        response: serializeCredential(credential)
       })
     });
 
@@ -228,9 +221,7 @@ loginButton.addEventListener("click", async () => {
       throw new Error(result.error || "Passkey verification failed.");
     }
 
-    const target = new URL("https://tyleros.uk/transit");
-    target.searchParams.set("return", result.returnPath || safeReturnPath(returnPath));
-    window.location.replace(target.toString());
+    window.location.replace("https://tyleros.uk/transit");
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Something went wrong.", "error");
