@@ -301,7 +301,11 @@ app.post("/api/login/verify", async (c) => {
     });
   } catch (error) {
     console.error("WebAuthn authentication error:", error);
-    return c.json({ error: "Passkey verification failed." }, 401);
+    const message = error instanceof Error ? error.message : String(error);
+    return c.json({
+      error: `Passkey verification failed: ${message}`,
+      code: "WEBAUTHN_VERIFY_ERROR",
+    }, 401);
   }
 
   await c.env.DB.prepare("DELETE FROM auth_challenges WHERE id = ?")
