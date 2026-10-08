@@ -556,6 +556,21 @@ app.all("*", async (c) => {
   }
 
   if (hostname === "tyleros.uk") {
+    // Transit is a protected page, but its static assets must be served
+    // without re-entering the page's authentication redirect.
+    const pathname = new URL(c.req.url).pathname;
+    const transitAssets = new Set([
+      "/transit.js",
+      "/styles.css",
+      "/TylerOS.svg",
+      "/TylerOS White.svg",
+      "/favicon.ico",
+    ]);
+
+    if (transitAssets.has(pathname)) {
+      return c.env.ASSETS.fetch(c.req.raw);
+    }
+
     const session = await getSession(c.req.raw, c.env);
 
     if (!session) {
