@@ -26,6 +26,8 @@ const app = new Hono<{ Bindings: Bindings }>();
 
 const SESSION_COOKIE = "tyleros_session";
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const SESSION_LEASE_MS = 15 * 1000;
+const HEARTBEAT_MIN_INTERVAL_MS = 3 * 1000;
 const HANDOFF_TTL_MS = 2 * 60 * 1000;
 
 function base64url(bytes: Uint8Array): string {
@@ -66,17 +68,19 @@ async function getSession(request: Request, env: Bindings) {
 
   const tokenHash = await sha256(token);
   const session = await env.DB.prepare(
-    `SELECT id, stage, expires_at
+    `SELECT id, stage, expires_at, last_seen_at
      FROM sessions
      WHERE token_hash = ?
      LIMIT 1`
   )
     .bind(tokenHash)
-    .first<{ id: string; stage: SessionStage; expires_at: number }>();
+    .first<{ id: string; stage: SessionStage; expires_at: number; last_seen_at: number }>();
 
   if (!session) return null;
 
-  if (session.expires_at <= Date.now()) {
+  const now = Date.now();
+
+  if (session.expires_at <= now || session.last_seen_at + SESSION_LEASE_MS <= now) {
     await env.DB.prepare("DELETE FROM sessions WHERE id = ?")
       .bind(session.id)
       .run();
@@ -93,10 +97,11 @@ async function createSession(env: Bindings, stage: SessionStage) {
   const now = Date.now();
 
   await env.DB.prepare(
-    `INSERT INTO sessions (id, token_hash, stage, created_at, expires_at)
-     VALUES (?, ?, ?, ?, ?)`
+    `INSERT INTO sessions
+      (id, token_hash, stage, created_at, expires_at, last_seen_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
   )
-    .bind(id, tokenHash, stage, now, now + SESSION_TTL_MS)
+    .bind(id, tokenHash, stage, now, now + SESSION_TTL_MS, now)
     .run();
 
   return token;
@@ -350,6 +355,73 @@ app.get("/api/session", async (c) => {
   return c.json({
     authenticated: Boolean(session),
     stage: session?.stage ?? null,
+  });
+});
+
+app.post("/api/heartbeat", async (c) => {
+  const token = getSessionToken(c.req.raw);
+  if (!token) {
+    return c.json({
+      alive: false,
+      authenticated: false,
+      code: "AUTH_REQUIRED",
+    }, 401);
+  }
+
+  const tokenHash = await sha256(token);
+  const session = await c.env.DB.prepare(
+    `SELECT id, stage, expires_at, last_seen_at
+     FROM sessions
+     WHERE token_hash = ?
+     LIMIT 1`
+  )
+    .bind(tokenHash)
+    .first<{
+      id: string;
+      stage: SessionStage;
+      expires_at: number;
+      last_seen_at: number;
+    }>();
+
+  const now = Date.now();
+
+  if (
+    !session ||
+    session.expires_at <= now ||
+    session.last_seen_at + SESSION_LEASE_MS <= now
+  ) {
+    if (session) {
+      await c.env.DB.prepare("DELETE FROM sessions WHERE id = ?")
+        .bind(session.id)
+        .run();
+    }
+
+    return c.json({
+      alive: false,
+      authenticated: false,
+      code: "AUTH_LEASE_EXPIRED",
+    }, 401, {
+      "Set-Cookie": clearSessionCookie(),
+    });
+  }
+
+  // Ignore accidental duplicate heartbeats arriving too quickly.
+  if (now - session.last_seen_at >= HEARTBEAT_MIN_INTERVAL_MS) {
+    await c.env.DB.prepare(
+      `UPDATE sessions
+       SET last_seen_at = ?
+       WHERE id = ?`
+    )
+      .bind(now, session.id)
+      .run();
+  }
+
+  return c.json({
+    alive: true,
+    authenticated: true,
+    stage: session.stage,
+    expiresAt: session.expires_at,
+    leaseExpiresAt: now + SESSION_LEASE_MS,
   });
 });
 

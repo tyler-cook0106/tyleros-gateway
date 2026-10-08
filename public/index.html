@@ -14,11 +14,7 @@
     <img class="brand-icon" src="/TylerOS White.svg" alt="TylerOS">
     <div class="wordmark">TylerOS</div>
 
-    <div id="turnstile" class="cf-turnstile"
-      data-action="login"
-      data-callback="onTurnstileSuccess"
-      data-expired-callback="onTurnstileExpired"
-      data-error-callback="onTurnstileError"></div>
+    <div id="turnstile" aria-live="polite"></div>
 
     <button id="loginButton" disabled>Authenticate</button>
     <p id="status" class="status" aria-live="polite"></p>

@@ -4,6 +4,8 @@ const turnstileElement = document.getElementById("turnstile");
 
 let turnstileToken = null;
 let turnstileWidgetId = null;
+let turnstileAutoRetryUsed = false;
+let turnstileResetTimer = null;
 
 const params = new URLSearchParams(window.location.search);
 const returnPath = params.get("return") || "/";
@@ -15,6 +17,7 @@ function setStatus(message, type = "") {
 
 window.onTurnstileSuccess = (token) => {
   turnstileToken = token;
+  turnstileAutoRetryUsed = false;
   loginButton.disabled = false;
   setStatus("Human verification complete.");
 };
@@ -28,7 +31,24 @@ window.onTurnstileExpired = () => {
 window.onTurnstileError = () => {
   turnstileToken = null;
   loginButton.disabled = true;
-  setStatus("Human verification could not be completed.", "error");
+
+  if (!turnstileAutoRetryUsed && window.turnstile && turnstileWidgetId !== null) {
+    turnstileAutoRetryUsed = true;
+    setStatus("Retrying human verification…");
+
+    if (turnstileResetTimer) clearTimeout(turnstileResetTimer);
+    turnstileResetTimer = setTimeout(() => {
+      try {
+        window.turnstile.reset(turnstileWidgetId);
+      } catch (error) {
+        console.error("Turnstile reset error:", error);
+        setStatus("Human verification could not be completed. Try again.", "error");
+      }
+    }, 250);
+    return;
+  }
+
+  setStatus("Human verification could not be completed. Try again.", "error");
 };
 
 function base64urlToUint8Array(value) {
@@ -83,6 +103,7 @@ async function initialiseTurnstile() {
     turnstileWidgetId = window.turnstile.render(turnstileElement, {
       sitekey: config.turnstileSiteKey,
       action: "login",
+      appearance: "interaction-only",
       callback: window.onTurnstileSuccess,
       "expired-callback": window.onTurnstileExpired,
       "error-callback": window.onTurnstileError
@@ -155,6 +176,7 @@ loginButton.addEventListener("click", async () => {
     loginButton.disabled = true;
 
     if (window.turnstile && turnstileWidgetId !== null) {
+      turnstileAutoRetryUsed = false;
       window.turnstile.reset(turnstileWidgetId);
     }
   }
