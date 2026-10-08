@@ -18,6 +18,7 @@ type Bindings = {
   TURNSTILE_SITE_KEY: string;
   TURNSTILE_SECRET_KEY: string;
   DMZ_ORIGIN: string;
+  DMZ: Fetcher;
   DMZ_SIGNING_PRIVATE_KEY_JWK: string;
   DMZ_SERVICE_PUBLIC_KEY_JWK: string;
 };
@@ -1145,7 +1146,20 @@ app.all("*", async (c) => {
       return Response.redirect(new URL("/transit", c.req.url).toString(), 302);
     }
 
-    return c.env.ASSETS.fetch(c.req.raw);
+    // Once the DMZ device-proof stage is complete, tyleros.uk becomes
+    // the public application entrypoint. Keep the Worker as the gatekeeper,
+    // then route the authenticated request privately through Workers VPC
+    // to the DMZ gateway. The VPC Service target is fixed by Cloudflare;
+    // the request URL supplies the Host/path that the DMZ gateway sees.
+    try {
+      return await c.env.DMZ.fetch(c.req.raw);
+    } catch (error) {
+      console.error("DMZ VPC request failed:", error);
+      return c.json({
+        error: "TylerOS DMZ is unavailable.",
+        code: "DMZ_VPC_UNAVAILABLE",
+      }, 503);
+    }
   }
 
   return c.json({ error: "Unknown TylerOS hostname." }, 404);

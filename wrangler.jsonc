@@ -19,6 +19,13 @@
     }
   ],
 
+  "vpc_services": [
+    {
+      "binding": "DMZ",
+      "service_id": "01a11d69-e6ed-75e2-806b-ce28bdc20ff5"
+    }
+  ],
+
   "vars": {
     "RP_NAME": "TylerOS",
     "RP_ID": "auth.tyleros.uk",
