@@ -1139,7 +1139,12 @@ app.all("*", async (c) => {
     // Public DMZ hostname: forward to the private DMZ gateway over the VPC.
     // The DMZ gateway validates the handoff and performs device proof.
     try {
-      return await c.env.DMZ.fetch(c.req.raw);
+      const vpcUrl = new URL(c.req.url);
+      // The configured VPC service exposes HTTP on port 8080, not HTTPS.
+      // Preserve the original hostname, path, query, method, and headers while
+      // using HTTP so the VPC binding selects the configured HTTP target.
+      vpcUrl.protocol = "http:";
+      return await c.env.DMZ.fetch(new Request(vpcUrl.toString(), c.req.raw));
     } catch (error) {
       console.error("DMZ VPC request failed:", error);
       return c.json({
@@ -1166,7 +1171,12 @@ app.all("*", async (c) => {
     // to the DMZ gateway. The VPC Service target is fixed by Cloudflare;
     // the request URL supplies the Host/path that the DMZ gateway sees.
     try {
-      return await c.env.DMZ.fetch(c.req.raw);
+      const vpcUrl = new URL(c.req.url);
+      // The configured VPC service exposes HTTP on port 8080, not HTTPS.
+      // Preserve the original hostname, path, query, method, and headers while
+      // using HTTP so the VPC binding selects the configured HTTP target.
+      vpcUrl.protocol = "http:";
+      return await c.env.DMZ.fetch(new Request(vpcUrl.toString(), c.req.raw));
     } catch (error) {
       console.error("DMZ VPC request failed:", error);
       return c.json({
