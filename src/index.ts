@@ -1135,6 +1135,20 @@ app.all("*", async (c) => {
     return c.env.ASSETS.fetch(c.req.raw);
   }
 
+  if (hostname === "dmz.tyleros.uk") {
+    // Public DMZ hostname: forward to the private DMZ gateway over the VPC.
+    // The DMZ gateway validates the handoff and performs device proof.
+    try {
+      return await c.env.DMZ.fetch(c.req.raw);
+    } catch (error) {
+      console.error("DMZ VPC request failed:", error);
+      return c.json({
+        error: "TylerOS DMZ is unavailable.",
+        code: "DMZ_VPC_UNAVAILABLE",
+      }, 503);
+    }
+  }
+
   if (hostname === "tyleros.uk") {
     const session = await getSession(c.req.raw, c.env);
 
