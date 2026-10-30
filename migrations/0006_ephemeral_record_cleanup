@@ -1,0 +1,6 @@
+-- Cleanup expired, non-authoritative authentication artefacts.
+-- This migration is a one-time cleanup; future cleanup should be scheduled.
+DELETE FROM auth_challenges WHERE expires_at <= (strftime('%s','now') * 1000);
+DELETE FROM handoffs WHERE expires_at <= (strftime('%s','now') * 1000);
+DELETE FROM dmz_grants WHERE expires_at <= (strftime('%s','now') * 1000);
+DELETE FROM dmz_request_nonces WHERE expires_at <= (strftime('%s','now') * 1000);
