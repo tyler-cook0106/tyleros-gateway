@@ -515,9 +515,21 @@ app.post("/api/login/verify", async (c) => {
     }
 
     try {
-      await c.env.DB.prepare("DELETE FROM auth_challenges WHERE id = ?")
-        .bind(body.challengeId)
+      // Consume the challenge conditionally. Only one concurrent request can
+      // delete this live challenge and proceed to session creation.
+      const consumed = await c.env.DB.prepare(
+        `DELETE FROM auth_challenges
+         WHERE id = ? AND type = ? AND expires_at > ?`
+      )
+        .bind(body.challengeId, "authentication", Date.now())
         .run();
+
+      if (consumed.meta.changes !== 1) {
+        return c.json({
+          error: "Authentication challenge has already been used or expired.",
+          code: "AUTH_CHALLENGE_REPLAYED",
+        }, 409);
+      }
 
       await c.env.DB.prepare(
         `UPDATE webauthn_credentials
